@@ -5,7 +5,7 @@ A VB.NET Application that creates and plays a midi file of random notes for ear 
 Instrument,
 Number of Repetitions of the file,
 Number of Notes in the file,
-Note timing within the Musical Line'
+Note timing within the Musical Line,
 The length of the silence at the end of the Musical Line,
 The Range of Notes included in the Musical Line,
 The Scale of the Musical Line,
