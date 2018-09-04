@@ -1,0 +1,479 @@
+Option Explicit On
+
+Public Class frmEar1
+
+    'strNotes will hold the allowable notes(0 to 36) for the selected scale and key. Random notes 
+    'will be generated and then checked to see if they are "allowed" (in this array).
+    Dim strNotes(50) As String
+
+    'one of the "business rules" of the application is that it does not repeat the same note twice 
+    'in a row. This varialble will hold the value of the previous note so that this can be verified.
+    Dim intPreviousNote As Integer = -1
+
+    'The application uses three files. initials.txt holds the last updated values of the combo boxes. 
+    'The application playback alternates back and forth between 2 .MID (Midi) files
+    Dim strWriteFolder As String = IO.Directory.GetParent(Application.ExecutablePath).FullName
+    Dim strFileSettings As String = strWriteFolder & "\initials.txt"
+    Dim strFileMidiA As String = strWriteFolder & "\mmmidA.MID"
+    Dim strFileMidiB As String = strWriteFolder & "\mmmidB.MID"
+
+    Dim strSavedSettings As String = "" 'initials.txt will hold a comma separated string
+    Dim bolUpdating As Boolean = False 'hold off playing while new settings are being saved
+
+    'The application creates a Midifile with parameters based on the criteria selected in the set of 
+    'combo boxes. But it doesn't actually use the values in the combo boxes, it uses the 
+    'last set of combo values that were present and saved the last time the Update button 
+    'was clicked. The saved "update" values are stored in the strLastUpdateSettings array. This 
+    'insulates the running program from changes that the User may make to the values in the 
+    'combo boxes
+    Dim strLastUpdateSettings(12) As String
+
+    'This note numbers used in this program are based on the layout of the guitar fretboard. The notes 
+    'used span 3 octaves (12 notes per octave). 0 represents the Low E note located at the low end of 
+    'the open, Low pitch String (First E below middle C). 36 represents the E note 3 octaves higher 
+    'located at the 12th fret of the highest pitch String.
+
+    'Each of these string sets of numbers represents a musical scale in the Key of A as it would fall 
+    'in a numberic template running from low E (0) to high E (36). The first number represents the 
+    'count of notes in A that fall between the E's. It is used in the program to keep processing in 
+    'the valid range of notes. The 0 at the end Is used when the numbers are adjusted for different 
+    'keys. More on that below in the ScaleAndKey() procedure comments.
+    Dim strAllScalesData() As String =
+        {"37,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25," _
+        & "26,27,28,29,30,31,32,33,34,35,36,0", 'Chromatic (all notes)
+        "22,0,2,4,5,7,9,10,12,14,16,17,19,21,22,24,26,28,29,31,33,34,36,0", 'Major
+        "22,0,1,4,5,7,8,10,12,13,16,17,19,20,22,24,25,28,29,31,32,34,36,0", 'Harmonic Minor
+        "22,0,1,3,5,7,8,10,12,13,15,17,19,20,22,24,25,27,29,31,32,34,36,0", 'Melodic Minor Descending
+        "22,0,2,4,5,7,8,10,12,14,16,17,19,20,22,24,26,28,29,31,32,34,36,0", 'Melodic Minor Ascending
+        "16,0,3,5,8,10,12,15,17,20,22,24,27,29,32,34,36,0", 'Pentatonic
+        "19,0,3,5,8,10,11,12,15,17,20,22,23,24,27,29,32,34,35,36,0"} 'Pentatonic Plus(Sharp "4")
+
+    'Sub btnUpdate_Click() - Overview:
+    'User changed settings in the combo boxes are not "acted upon" by the program until 
+    'the Update button is clicked. This insulates the program execution from changes in 
+    'values in the middle of processing. When clicked this procedure will:
+    'stop the MediaPlayer and "disconnect" it from either Midi file
+    'update the values in the array used for processing (strLastUpdateSettings)
+    'write the new setting values out to the initials.txt file
+    'create two new Midi files with the new settings for when playing resumes
+    'resume playing
+    Private Sub btnUpdate_Click(sender As Object, e As EventArgs) Handles btnUpdate.Click
+        Dim x1 As Integer = 0
+        Dim bolNewSetOfNotes As Boolean = False 'Has scale or key been changed
+        Dim bolNewTempo As Boolean = False 'Has the tempo been changed
+
+        bolUpdating = True ' Prevent playing while files are being written
+        wmp1.Ctlcontrols.stop()
+        wmp1.URL = "" 'Both MidiA and MidiB can be safely rewritten. They won't be open.
+
+        'If the scale or key has changed, the set of "allowed" note values will need to be
+        'updated in the ScaleAndKey() procedure. the strNotes array holds the "allowed"
+        'notes. strNotes is updated in ScaleAndKey() and then used in GetNote().
+        'I could just run this every time but for now: if for example just the number of 
+        'repetitions is changed, then the ScaleAndKey() procedure is not run needlessly. 
+        'Same with Tempo_Bytes() below.
+        If strLastUpdateSettings(6) <> cmbScale.SelectedIndex Or
+            strLastUpdateSettings(7) <> cmbKey.SelectedIndex Then
+            bolNewSetOfNotes = True
+        End If
+
+        'If the tempo has changed then run the Tempo_Bytes() procedure to calculate the
+        'hex byte value needed in the Midifile to set the tempo.
+        If strLastUpdateSettings(9) <> numudTempo.Value Then
+            bolNewTempo = True
+        End If
+
+        'If the range of notes selected is too narrow (less than 5 tones (half steps)) 
+        'or negative, then this loop will widen the range to 5 tones.
+        Do While cmbRangeH.SelectedIndex - cmbRangeL.SelectedIndex < 5
+            If cmbRangeL.SelectedIndex <> 0 Then
+                cmbRangeL.SelectedIndex = cmbRangeL.SelectedIndex - 1
+            End If
+            If cmbRangeH.SelectedIndex <> 36 Then
+                cmbRangeH.SelectedIndex = cmbRangeH.SelectedIndex + 1
+            End If
+        Loop
+
+        'The new values from the combo boxes are loaded into the array that is used
+        'by the program for processing (User insulation).
+        strLastUpdateSettings(0) = cmbReps.SelectedIndex
+        strLastUpdateSettings(1) = cmbNotes.SelectedIndex
+        strLastUpdateSettings(2) = cmbTime.SelectedIndex
+        strLastUpdateSettings(3) = cmbPause.SelectedIndex
+        strLastUpdateSettings(4) = cmbRangeL.SelectedIndex
+        strLastUpdateSettings(5) = cmbRangeH.SelectedIndex
+        strLastUpdateSettings(6) = cmbScale.SelectedIndex
+        strLastUpdateSettings(7) = cmbKey.SelectedIndex
+        strLastUpdateSettings(8) = cmbInstrument.SelectedIndex
+        strLastUpdateSettings(9) = numudTempo.Value
+        wmp1.settings.playCount = strLastUpdateSettings(0) + 1
+
+        'If the User changed the scale or key get a new set of "allowed" notes
+        If bolNewSetOfNotes = True Then
+            ScaleAndKey()
+        End If
+
+        'If the User changed the tempo do the calculations needed to convert the 
+        'beats per minute number to the hex value used by the Midi file.
+        If bolNewTempo = True Then
+            Tempo_Bytes()
+        End If
+
+        'Create a set of Midi files to start with when playing commences using the 
+        'new settings.
+        Filewrite(strFileMidiA)
+        Filewrite(strFileMidiB)
+
+        bolUpdating = False 'files created - safe to Play again at next timer tick.
+
+        'The updated settings are concatenated to a comma separated string and written
+        'to the initials.txt file. If the application is closed and reopened the file
+        'will be used to populate the combo boxes and the strLastUpdateSettings array.
+        strSavedSettings = ""
+        For x1 = 0 To 11
+            strSavedSettings = strSavedSettings + Str(strLastUpdateSettings(x1)) + ","
+        Next
+        If My.Computer.FileSystem.FileExists(strFileSettings) Then
+            My.Computer.FileSystem.DeleteFile(strFileSettings)
+        End If
+        My.Computer.FileSystem.WriteAllText(strFileSettings, strSavedSettings, False)
+
+        'As of now the Application goes directly to "Play" mode after btnUpdate is 
+        'clicked. For now I make sure the Pause/Play button to say Pause. I will edit the
+        'Timer1_Tick procedure to stay in whatever Pause/Play mode it was in going
+        'forward but for now it goes to Play after Update.(when I add a volume slider)
+        btnPause.Text = "Pause"
+
+    End Sub
+
+    'Sub frmEar1_Load() Overview:
+    'This is very simple. Sets up the form. Loads previous settings or Default Settings.
+    'Sets up MediaPlayer. The Timer takes it from there.
+    Private Sub frmEar1_Load(sender As Object, e As EventArgs) Handles Me.Load
+
+        Dim x2 As Integer
+        Randomize()
+        frmEar1_Resize(sender, e) 'line up form elements first time
+
+        'If no initials.txt file exists then use these default values for the settings.
+        'Load them into the combo boxes for display then into the strLastUpdateSettings 
+        'Array for use by the program. Then create the first initials.txt with these 
+        'default values.
+
+        'Update combo boxes with the Default settings.
+        If Not My.Computer.FileSystem.FileExists(strFileSettings) Then
+            cmbReps.SelectedIndex = 0 'instrument
+            cmbNotes.SelectedIndex = 3 'number of notes in Midi file
+            cmbTime.SelectedIndex = 2 'sixteenth - eight - quater - half - random
+            cmbPause.SelectedIndex = 0 'length of pause at end of Midi file (quarters)
+            cmbRangeL.SelectedIndex = 0 'low end of allowable notes 
+            cmbRangeH.SelectedIndex = 36 'high end of allowable notes
+            cmbScale.SelectedIndex = 0 '7 available scales
+            cmbKey.SelectedIndex = 0 'key
+            cmbInstrument.SelectedIndex = 0 '80 available instruments
+            numudTempo.Value = 45 'tempo in beats per minute
+
+            'Update the strLastUpdateSettings Array with the Default settings.
+            strLastUpdateSettings(0) = cmbReps.SelectedIndex
+            strLastUpdateSettings(1) = cmbNotes.SelectedIndex
+            strLastUpdateSettings(2) = cmbTime.SelectedIndex
+            strLastUpdateSettings(3) = cmbPause.SelectedIndex
+            strLastUpdateSettings(4) = cmbRangeL.SelectedIndex
+            strLastUpdateSettings(5) = cmbRangeH.SelectedIndex
+            strLastUpdateSettings(6) = cmbScale.SelectedIndex
+            strLastUpdateSettings(7) = cmbKey.SelectedIndex
+            strLastUpdateSettings(8) = cmbInstrument.SelectedIndex
+            strLastUpdateSettings(9) = numudTempo.Value
+            strLastUpdateSettings(10) = 2
+            strLastUpdateSettings(11) = 0
+
+            'Save defaults to new initials.txt file
+            strSavedSettings = ""
+            For x2 = 0 To 11
+                strSavedSettings = strSavedSettings + Str(strLastUpdateSettings(x2)) + ","
+            Next
+            My.Computer.FileSystem.WriteAllText(strFileSettings, strSavedSettings, True)
+        Else
+            'initials.txt exists so read the file (commma separated string) and load the 
+            'values into the strLastUpdateSettings Array and into the combo boxes.
+            strSavedSettings = My.Computer.FileSystem.ReadAllText(strFileSettings)
+            strLastUpdateSettings = Strings.Split(strSavedSettings, (","))
+            cmbReps.SelectedIndex = strLastUpdateSettings(0)
+            cmbNotes.SelectedIndex = strLastUpdateSettings(1)
+            cmbTime.SelectedIndex = strLastUpdateSettings(2)
+            cmbPause.SelectedIndex = strLastUpdateSettings(3)
+            cmbRangeL.SelectedIndex = strLastUpdateSettings(4)
+            cmbRangeH.SelectedIndex = strLastUpdateSettings(5)
+            cmbScale.SelectedIndex = strLastUpdateSettings(6)
+            cmbKey.SelectedIndex = strLastUpdateSettings(7)
+            cmbInstrument.SelectedIndex = strLastUpdateSettings(8)
+            numudTempo.Value = strLastUpdateSettings(9)
+        End If
+        ScaleAndKey() 'Create a set of "allowed" notes in the strNotes Array
+        Tempo_Bytes() 'Convert the Beats per Minute number to a hex bytes
+        Filewrite(strFileMidiA) 'Create the first 2 Midi files to start with
+        Filewrite(strFileMidiB)
+        wmp1.URL = strFileMidiB 'Set up MediaPlayer for the first Timer Tick
+        wmp1.settings.playCount = strLastUpdateSettings(0) + 1
+        wmp1.Ctlcontrols.stop()
+    End Sub
+
+    'Sub Timer1_Tick() Overview:
+    'This procedure oscillates between the MidiA file and the MidiB file. If A is done
+    'playing (status "Stopped" or "Ready") it will point MediaPlayer at B and start 
+    'playing it. The procedure will then Write a new A file while B is playing. And
+    'Vice Versa.
+    Private Sub Timer1_Tick(sender As Object, e As EventArgs) Handles Timer1.Tick
+        'The bolUpdating Flag keeps MediaPlayer from loading and playing a Midi file 
+        'while it may be in use in another procedure.
+        If Not bolUpdating Then
+            If wmp1.status = "Stopped" Or wmp1.status = "Ready" Then
+                If wmp1.URL = strFileMidiA Then
+                    wmp1.URL = ""
+                    wmp1.URL = strFileMidiB
+                Else
+                    wmp1.URL = ""
+                    wmp1.URL = strFileMidiA
+                End If
+                wmp1.Ctlcontrols.play()
+                If wmp1.URL = strFileMidiA Then
+                    Filewrite(strFileMidiB)
+                Else
+                    Filewrite(strFileMidiA)
+                End If
+            End If
+        End If
+    End Sub
+
+    'Sub Filewrite() Overview:
+    'When I wrote this program I separated out the various pieces of the hex
+    'Midi file into their own arrays. It simplified debugging when I was 
+    'flipping back and forth between VS and Notepad++ looking at hex values.
+    'I can rewrite this procedure and go down to 3 Arrays. Without going into
+    'the details of Midi specs, the middle section that contains the notes is
+    'the only section that varies in size. I can write 3 arrays: beginning-middle
+    '-end.
+    'The Sub sets up the data needed into various arrays and then writes them 
+    'to the file appending each to the end of the previous FileWrite.
+    'The first section loads constant values or values derived from the settings
+    'into various arrays for file writing.
+    'The second section gathers the random note and timing values and loads them
+    'into the bytTrackNoteData array for writing.
+    'The third section does the actual writing to the file (path sent as a parameter)
+
+    'In this first section I declare the various arrays needed to hold the different
+    'sections of the Midi file. There are several sites on the internet that spell
+    'out the exact specification for the required hex values. Some of the bytes of 
+    'the file are numeric constants so they are loaded right away. Other bytes can
+    'be easliy calculated from the combo box settings so they are calculated and 
+    'loaded right away as well.
+    Private Sub Filewrite(strFilePath As String)
+        Dim bytMidiHeader() As Byte = {&H4D, &H54, &H68, &H64, &H0, &H0, &H0, &H6}
+        Dim bytSubFormatType() As Byte = {&H0, &H0}
+        Dim bytTrackNumber() As Byte = {&H0, &H1}
+        Dim bytSpeed() As Byte = {CByte(strLastUpdateSettings(10)),
+            CByte(strLastUpdateSettings(11))}
+        Dim bytTrackHeader() As Byte = {&H4D, &H54, &H72, &H6B, &H0, &H0, &H0}
+        Dim bytTrackByteCount() As Byte = {CByte(((strLastUpdateSettings(1) + 1) * 7) _
+            + 12 + (strLastUpdateSettings(3) * 7))}
+        Dim bytTrackNoteData(500) As Byte 'Holds random note/timing and end rest data
+        Dim bytHoldEachNote() As Byte = {&HFF} 'Also used for note section
+        Dim bytTrackPauseData() As Byte = {&H0, &H3E, &H0, &H83, &H0, &H3E, &H0}
+        Dim bytTrackSilenceAll() As Byte = {&H7F, &HB0, &H7B, &H0}
+        Dim bytTrackEnd() As Byte = {&H0, &HFF, &H2F, &H0}
+        Dim bytInstrument() As Byte = {&H0, &HC0, CByte(strLastUpdateSettings(8))}
+
+        'Variables used in the next section to calculate random notes and random timing
+        Dim x3 As Integer
+        Dim intNoteCount As Integer = (strLastUpdateSettings(1) + 1)
+        Dim intRestCount As Integer = strLastUpdateSettings(3)
+        Dim intNoteTiming As Integer
+
+        'This section of the Sub is where the data for the random notes are 
+        'requested and gathered into the bytTrackNoteData Array. There are 7 bytes
+        'of data required for each note. The actual value of the note is returned 
+        'from the GetNote() Function. 
+        x3 = 0
+        bytTrackNoteData(0) = &H0
+        intPreviousNote = -1
+        Do Until x3 = intNoteCount
+            If ((x3 * 7) + 1) = 1 Then
+                bytTrackNoteData((x3 * 7) + 1) = &H90
+            Else
+                bytTrackNoteData((x3 * 7) + 1) = &H0
+            End If
+            bytTrackNoteData((x3 * 7) + 2) = GetNote()
+            bytTrackNoteData((x3 * 7) + 3) = &H60
+            If strLastUpdateSettings(2) = 4 Then
+                intNoteTiming = CSng(Int(Rnd() * 4))
+            Else
+                intNoteTiming = strLastUpdateSettings(2)
+            End If
+            Select Case (intNoteTiming)
+                Case 0
+                    bytTrackNoteData((x3 * 7) + 4) = &H81
+                Case 1
+                    bytTrackNoteData((x3 * 7) + 4) = &H82
+                Case 2
+                    bytTrackNoteData((x3 * 7) + 4) = &H84
+                Case 3
+                    bytTrackNoteData((x3 * 7) + 4) = &H88
+            End Select
+            bytTrackNoteData((x3 * 7) + 5) = &H0
+            bytTrackNoteData((x3 * 7) + 6) = bytTrackNoteData((x3 * 7) + 2)
+            bytTrackNoteData((x3 * 7) + 7) = &H0
+            x3 = x3 + 1
+        Loop
+
+        'This section is where the actual FileWrite commands are done. As I noted
+        'above, I will simplify the number of arrays used and reduce this to
+        '3 or 4 "writes".
+        If My.Computer.FileSystem.FileExists(strFilePath) Then
+            My.Computer.FileSystem.DeleteFile(strFilePath)
+        End If
+        My.Computer.FileSystem.WriteAllBytes(strFilePath, bytMidiHeader, True)
+        My.Computer.FileSystem.WriteAllBytes(strFilePath, bytSubFormatType, True)
+        My.Computer.FileSystem.WriteAllBytes(strFilePath, bytTrackNumber, True)
+        My.Computer.FileSystem.WriteAllBytes(strFilePath, bytSpeed, True)
+        My.Computer.FileSystem.WriteAllBytes(strFilePath, bytTrackHeader, True)
+        My.Computer.FileSystem.WriteAllBytes(strFilePath, bytTrackByteCount, True)
+        My.Computer.FileSystem.WriteAllBytes(strFilePath, bytInstrument, True)
+        For x3 = 0 To (intNoteCount * 7)
+            bytHoldEachNote(0) = bytTrackNoteData(x3)
+            My.Computer.FileSystem.WriteAllBytes(strFilePath, bytHoldEachNote, True)
+        Next
+        For x3 = 1 To intRestCount
+            My.Computer.FileSystem.WriteAllBytes(strFilePath, bytTrackPauseData, True)
+        Next
+        My.Computer.FileSystem.WriteAllBytes(strFilePath, bytTrackSilenceAll, True)
+        My.Computer.FileSystem.WriteAllBytes(strFilePath, bytTrackEnd, True)
+    End Sub
+
+    'Sub ScaleAndKey Overview:
+    'This Sub creates the set of valid "notes" that fall in the user selected Scale 
+    'and Key.
+    'The strAllScalesData Array is loaded with 7 strings when the Application opens. 
+    'These strings are comma separated sets of numbers which represent the notes of
+    '7 different musical scales. They represent the notes if all of the scales were
+    'in the key of A. First the Sub breaks the string apart into an integer array.
+    'If the key Of A# Is selected Then 1 Is added To Each "note" or each number in
+    'the Array. If the key of B is selected then 2 is added to each "note". etc.
+    'So first the scale is loaded into the strNotes Array. Second the Scale is 
+    'adjusted for the selected key. As note values go over 36 they are wrapped to 
+    'the low end (number - 36). If a note goes to exactly 36 then 36 is kept and 
+    '0 is "wrapped" to the low end.
+    Private Sub ScaleAndKey()
+        Dim x4 As Integer = 0
+        Dim strSelectedScale As String
+        Dim x6 As Integer
+        x6 = strLastUpdateSettings(6)    '6 corresponds to cmbScale
+        strSelectedScale = strAllScalesData(x6)
+        Array.Clear(strNotes, 0, strNotes(0))
+        strNotes = Split(strSelectedScale, ",")
+        For x4 = 1 To strNotes(0)
+            strNotes(x4) = Int(strNotes(x4)) + Int(strLastUpdateSettings(7))  '7 corresponds to cmbKey
+            If strNotes(x4) > 36 Then
+                strNotes(x4) = Int(strNotes(x4)) - 36
+            End If
+            If strNotes(x4) = 36 And strLastUpdateSettings(7) <> 0 Then
+                strNotes(0) = Int(strNotes(0)) + 1
+            End If
+        Next
+    End Sub
+
+    'Function GetNote() Overview:
+    'This Function returns the hex value of a note that matches the criteria 
+    'selected by the user. There are also some "business rules" enforced in 
+    'this Function.
+    '1. The same note is never selected twice in a row.
+    '2. No two notes are more than an octave apart (12 half steps or values)
+    '3. The note falls within the user specified range of notes.
+    'A random number(0 to 36) representing a note is generated. If it passes all 
+    'the criteria it is converted to hex and passed to the FileWrite Sub.
+    Private Function GetNote() As Byte
+        Dim bytNextNote As Byte
+        Dim x5 As Integer = 0
+        Dim intNewNote As Integer
+        Dim bolNotePasses As Boolean = False
+        Do While bolNotePasses = False
+            intNewNote = CSng(Int(Rnd() * 37))
+            For x5 = 1 To Int(strNotes(0))
+                If intNewNote = strNotes(x5) Then
+                    bolNotePasses = True
+                End If
+            Next
+            If bolNotePasses = True And intPreviousNote <> -1 Then
+                If intNewNote = intPreviousNote Then
+                    bolNotePasses = False
+                End If
+            End If
+            If bolNotePasses = True And intPreviousNote <> -1 Then
+                If (intPreviousNote < (intNewNote - 12) Or intPreviousNote > (intNewNote + 12)) Then
+                    bolNotePasses = False
+                End If
+            End If
+            If bolNotePasses = True And (intNewNote < strLastUpdateSettings(4) Or
+                intNewNote > strLastUpdateSettings(5)) Then
+                bolNotePasses = False
+            End If
+        Loop
+        intPreviousNote = intNewNote
+        bytNextNote = CByte(intNewNote + 40)
+        Return bytNextNote
+    End Function
+
+    'Sub btnPause_Click() Overview:
+    'The Timer_Tick Sub does not kick off the playing of the next file when the MediaPlayer
+    'is in "Paused" status. ("Playing" , "Ready", "Stopped" , and "Paused")
+    Private Sub btnPause_Click(sender As Object, e As EventArgs) Handles btnPause.Click
+        If btnPause.Text = "Play" Then
+            wmp1.Ctlcontrols.play()
+            btnPause.Text = "Pause"
+        Else
+            wmp1.Ctlcontrols.pause()
+            btnPause.Text = "Play"
+        End If
+    End Sub
+
+    'Sub frmEar1_Resize() Overview:
+    'On resize I keep the I keep the vertical (up down) distances/locations of the objects 
+    'static and adjust the horizontal locations so that they remain centered on the form.
+    Private Sub frmEar1_Resize(sender As Object, e As EventArgs) Handles Me.Resize
+        Dim Ctrl As System.Windows.Forms.Control
+        For Each Ctrl In Me.Controls
+            If TypeOf Ctrl Is ComboBox Or TypeOf Ctrl Is NumericUpDown Then
+                Ctrl.Left = Me.Width / 2
+                Ctrl.Top = 60 + (Ctrl.TabIndex * 35)
+            End If
+            If TypeOf Ctrl Is Label Then
+                Ctrl.Width = 140
+                Ctrl.Left = (Me.Width / 2) - 155
+                Ctrl.Top = 60 + (Ctrl.TabIndex * 35)
+            End If
+            If TypeOf Ctrl Is Button Then
+                Ctrl.Width = 135
+                Ctrl.Left = (Me.Width / 2) - 150
+            End If
+        Next
+    End Sub
+
+    'Sub Tempo_Bytes() Overview:
+    'The determination of the timing in a midi file is a little involved. There is
+    'a base timing for the file (2 hex values) and then a note specific timing (2
+    'more hex values). This could have been done several ways. I choose to simplify 
+    'the FileWrite Sub and put my complexity here. In the FileWrite Sub I use &H81, 
+    '&H82, &H84, and &H88 in the most significant byte to specify sixteenth, eigth, 
+    'quarter, and half notes at the note level. (0 in the other) I then worked 
+    'backwards from there To Get this formula And the constant 8.533333 to determine 
+    'the base timing values As the Beats per Minute value changes. I hold them in 
+    'the strLastUpdateSettings Array And write them out to initials.txt.
+    Private Sub Tempo_Bytes()
+        Dim intBeatsPerSec As Integer
+        Dim lngMidiTicks As Long
+        intBeatsPerSec = numudTempo.Value
+        lngMidiTicks = intBeatsPerSec * 8.533333
+        strLastUpdateSettings(10) = (Int(lngMidiTicks / 256))
+        strLastUpdateSettings(11) = (Int(lngMidiTicks) Mod 256)
+    End Sub
+
+End Class
