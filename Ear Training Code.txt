@@ -28,7 +28,7 @@ Public Class frmEar1
     'combo boxes
     Dim strLastUpdateSettings(12) As String
 
-    'This note numbers used in this program are based on the layout of the guitar fretboard. The notes 
+    'The note numbers used in this program are based on the layout of the guitar fretboard. The notes 
     'used span 3 octaves (12 notes per octave). 0 represents the Low E note located at the low end of 
     'the open, Low pitch String (First E below middle C). 36 represents the E note 3 octaves higher 
     'located at the 12th fret of the highest pitch String.
